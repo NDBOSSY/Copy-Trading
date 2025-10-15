@@ -26,6 +26,40 @@ signals_lock = threading.Lock()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Background cleanup thread
+def cleanup_stale_connections():
+    """Background thread to clean up stale connections every minute"""
+    global master_account, connected_accounts
+    
+    while True:
+        try:
+            time.sleep(60)  # Run every minute
+            
+            with accounts_lock:
+                current_time = datetime.now()
+                stale_accounts = []
+                
+                for acc_id, acc in connected_accounts.items():
+                    last_seen = datetime.fromisoformat(acc['last_seen'])
+                    if (current_time - last_seen).total_seconds() > 300:  # 5 minutes
+                        stale_accounts.append(acc_id)
+                
+                for acc_id in stale_accounts:
+                    del connected_accounts[acc_id]
+                    # Only clear master_account if the disconnected account was actually the master
+                    if master_account and acc_id == master_account:
+                        master_account = None
+                
+                if stale_accounts:
+                    logger.info(f"Cleaned up {len(stale_accounts)} stale connections: {stale_accounts}")
+                    
+        except Exception as e:
+            logger.error(f"Error in cleanup thread: {e}")
+
+# Start the cleanup thread when server starts
+cleanup_thread = threading.Thread(target=cleanup_stale_connections, daemon=True)
+cleanup_thread.start()
+
 def validate_api_key():
     """Validate API key from request headers"""
     api_key = request.headers.get('x-api-key')
@@ -120,9 +154,15 @@ def register_account():
         with accounts_lock:
             if is_master:
                 master_account = account_id
+                logger.info(f"MASTER registered: {name} (ID: {account_id})")
+            else:
+                logger.info(f"SLAVE registered: {name} (ID: {account_id}) - License: {data.get('license_owner', 'None')}")
+            
             connected_accounts[account_id] = account_data
         
-        logger.info(f"Account registered: {name} ({'MASTER' if is_master else 'SLAVE'}) - License: {data.get('license_owner', 'None')}")
+        # DEBUG: Log current state after registration
+        logger.info(f"DEBUG - Total accounts after registration: {len(connected_accounts)}")
+        logger.info(f"DEBUG - Account IDs: {list(connected_accounts.keys())}")
         
         return jsonify({
             'status': 'success',
@@ -136,29 +176,25 @@ def register_account():
 
 @app.route('/connected-accounts', methods=['GET'])
 def get_connected_accounts():
-    """Get all connected accounts"""
+    """Get all connected accounts - FIXED: No cleanup during fetch"""
     global master_account
     
     try:
+        # REMOVED cleanup logic - it runs in background thread now
+        # Just return the current state without modifying it
+        
         with accounts_lock:
-            # Remove stale connections (older than 5 minutes)
-            current_time = datetime.now()
-            stale_accounts = []
-            
-            for acc_id, acc in connected_accounts.items():
-                last_seen = datetime.fromisoformat(acc['last_seen'])
-                if (current_time - last_seen).total_seconds() > 300:  # 5 minutes
-                    stale_accounts.append(acc_id)
-            
-            for acc_id in stale_accounts:
-                del connected_accounts[acc_id]
-                # Only clear master_account if the disconnected account was actually the master
-                if master_account and acc_id == master_account:
-                    master_account = None
+            accounts_copy = connected_accounts.copy()
+        
+        # DEBUG: Log what we're returning
+        slave_count = sum(1 for acc in accounts_copy.values() if not acc.get('is_master', False))
+        master_count = sum(1 for acc in accounts_copy.values() if acc.get('is_master', False))
+        
+        logger.info(f"DEBUG - Returning {len(accounts_copy)} accounts ({master_count} masters, {slave_count} slaves)")
         
         return jsonify({
-            'accounts': connected_accounts,
-            'total_count': len(connected_accounts),
+            'accounts': accounts_copy,
+            'total_count': len(accounts_copy),
             'master_account': master_account,
             'timestamp': time.time()
         }), 200
@@ -184,6 +220,11 @@ def heartbeat():
                 connected_accounts[account_id]['profit'] = data.get('profit', connected_accounts[account_id]['profit'])
                 connected_accounts[account_id]['status'] = 'connected'
                 # License data persists automatically - no need to update
+                
+                # DEBUG: Log successful heartbeat
+                logger.debug(f"Heartbeat from {account_id}")
+            else:
+                logger.warning(f"Heartbeat from unknown account: {account_id}")
         
         return jsonify({'status': 'success'}), 200
         
@@ -204,11 +245,18 @@ def disconnect():
         
         with accounts_lock:
             if account_id in connected_accounts:
+                account_name = connected_accounts[account_id].get('name', 'Unknown')
+                is_master = connected_accounts[account_id].get('is_master', False)
+                
+                if is_master:
+                    logger.info(f"MASTER disconnected: {account_name} (ID: {account_id})")
+                else:
+                    logger.info(f"SLAVE disconnected: {account_name} (ID: {account_id})")
+                
                 connected_accounts[account_id]['status'] = 'disconnected'
                 if account_id == master_account:
                     master_account = None
         
-        logger.info(f"Account disconnected: {account_id}")
         return jsonify({'status': 'success'}), 200
         
     except Exception as e:
@@ -235,12 +283,32 @@ def get_master_status():
 @app.route('/health', methods=['GET'])
 def health_check():
     """Health check endpoint"""
+    with accounts_lock:
+        accounts_count = len(connected_accounts)
+        slave_count = sum(1 for acc in connected_accounts.values() if not acc.get('is_master', False))
+        master_count = sum(1 for acc in connected_accounts.values() if acc.get('is_master', False))
+    
     return jsonify({
         'status': 'healthy',
         'timestamp': time.time(),
-        'accounts_count': len(connected_accounts),
+        'accounts_count': accounts_count,
+        'slave_count': slave_count,
+        'master_count': master_count,
         'signals_count': len(recent_signals),
         'master_online': master_account is not None
+    }), 200
+
+@app.route('/debug/accounts', methods=['GET'])
+def debug_accounts():
+    """Debug endpoint to see all accounts in detail"""
+    with accounts_lock:
+        accounts_copy = connected_accounts.copy()
+    
+    return jsonify({
+        'accounts': accounts_copy,
+        'total_count': len(accounts_copy),
+        'master_account': master_account,
+        'timestamp': time.time()
     }), 200
 
 @app.route('/')
@@ -253,10 +321,12 @@ def home():
             'signal': 'POST /signal',
             'register': 'POST /register',
             'accounts': 'GET /connected-accounts',
-            'health': 'GET /health'
+            'health': 'GET /health',
+            'debug': 'GET /debug/accounts'
         }
     })
 
 if __name__ == '__main__':
     logger.info(f"Starting Copy Trading Server on port {PORT}")
+    logger.info("Stale connection cleanup running in background thread")
     app.run(host='0.0.0.0', port=PORT, debug=False)
