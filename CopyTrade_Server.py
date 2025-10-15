@@ -43,11 +43,11 @@ def handle_signal():
         if not data:
             return jsonify({'error': 'No data provided'}), 400
         
-        # Add timestamp and signal ID
+        # Add timestamp and signal ID - SAFELY handle master_account
         signal_data = {
             'signal_id': f"sig_{int(time.time())}_{len(recent_signals)}",
             'timestamp': time.time(),
-            'master_account': master_account,
+            'master_account': master_account if master_account else 'no_master',  # FIX: Handle None case
             **data
         }
         
@@ -149,7 +149,8 @@ def get_connected_accounts():
             
             for acc_id in stale_accounts:
                 del connected_accounts[acc_id]
-                if acc_id == master_account:
+                # FIX: Only clear master_account if the disconnected account was actually the master
+                if master_account and acc_id == master_account:
                     master_account = None
         
         return jsonify({
@@ -160,6 +161,7 @@ def get_connected_accounts():
         }), 200
         
     except Exception as e:
+        logger.error(f"Error in connected-accounts: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/heartbeat', methods=['POST'])
@@ -251,5 +253,4 @@ def home():
 
 if __name__ == '__main__':
     logger.info(f"Starting Copy Trading Server on port {PORT}")
-
     app.run(host='0.0.0.0', port=PORT, debug=False)
