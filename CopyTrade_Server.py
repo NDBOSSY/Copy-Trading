@@ -47,7 +47,7 @@ def handle_signal():
         signal_data = {
             'signal_id': f"sig_{int(time.time())}_{len(recent_signals)}",
             'timestamp': time.time(),
-            'master_account': master_account if master_account else 'no_master',  # FIX: Handle None case
+            'master_account': master_account if master_account else 'no_master',
             **data
         }
         
@@ -91,6 +91,8 @@ def get_signals():
 @app.route('/register', methods=['POST'])
 def register_account():
     """Register master or slave account"""
+    global master_account
+    
     try:
         data = request.get_json()
         account_id = data.get('account_id')
@@ -117,7 +119,6 @@ def register_account():
         
         with accounts_lock:
             if is_master:
-                global master_account
                 master_account = account_id
             connected_accounts[account_id] = account_data
         
@@ -136,6 +137,8 @@ def register_account():
 @app.route('/connected-accounts', methods=['GET'])
 def get_connected_accounts():
     """Get all connected accounts"""
+    global master_account
+    
     try:
         with accounts_lock:
             # Remove stale connections (older than 5 minutes)
@@ -149,7 +152,7 @@ def get_connected_accounts():
             
             for acc_id in stale_accounts:
                 del connected_accounts[acc_id]
-                # FIX: Only clear master_account if the disconnected account was actually the master
+                # Only clear master_account if the disconnected account was actually the master
                 if master_account and acc_id == master_account:
                     master_account = None
         
@@ -190,6 +193,8 @@ def heartbeat():
 @app.route('/disconnect', methods=['POST'])
 def disconnect():
     """Handle account disconnect"""
+    global master_account
+    
     try:
         data = request.get_json()
         account_id = data.get('account_id')
@@ -234,7 +239,8 @@ def health_check():
         'status': 'healthy',
         'timestamp': time.time(),
         'accounts_count': len(connected_accounts),
-        'signals_count': len(recent_signals)
+        'signals_count': len(recent_signals),
+        'master_online': master_account is not None
     }), 200
 
 @app.route('/')
