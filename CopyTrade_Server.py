@@ -109,7 +109,10 @@ def register_account():
             'equity': data.get('equity', 0),
             'profit': data.get('profit', 0),
             'status': 'connected',
-            'ip_address': request.remote_addr
+            'ip_address': request.remote_addr,
+            # STORE LICENSE DATA FROM SLAVE REGISTRATION
+            'license_owner': data.get('license_owner'),
+            'license_key': data.get('license_key')
         }
         
         with accounts_lock:
@@ -118,7 +121,7 @@ def register_account():
                 master_account = account_id
             connected_accounts[account_id] = account_data
         
-        logger.info(f"Account registered: {name} ({'MASTER' if is_master else 'SLAVE'})")
+        logger.info(f"Account registered: {name} ({'MASTER' if is_master else 'SLAVE'}) - License: {data.get('license_owner', 'None')}")
         
         return jsonify({
             'status': 'success',
@@ -133,8 +136,6 @@ def register_account():
 @app.route('/connected-accounts', methods=['GET'])
 def get_connected_accounts():
     """Get all connected accounts"""
-    global master_account  # 👈 declare at the top
-
     try:
         with accounts_lock:
             # Remove stale connections (older than 5 minutes)
@@ -177,6 +178,7 @@ def heartbeat():
                 connected_accounts[account_id]['equity'] = data.get('equity', connected_accounts[account_id]['equity'])
                 connected_accounts[account_id]['profit'] = data.get('profit', connected_accounts[account_id]['profit'])
                 connected_accounts[account_id]['status'] = 'connected'
+                # License data persists automatically - no need to update
         
         return jsonify({'status': 'success'}), 200
         
@@ -186,8 +188,6 @@ def heartbeat():
 @app.route('/disconnect', methods=['POST'])
 def disconnect():
     """Handle account disconnect"""
-    global master_account  # 👈 declare at the top
-
     try:
         data = request.get_json()
         account_id = data.get('account_id')
@@ -251,4 +251,5 @@ def home():
 
 if __name__ == '__main__':
     logger.info(f"Starting Copy Trading Server on port {PORT}")
+
     app.run(host='0.0.0.0', port=PORT, debug=False)
